@@ -24,7 +24,18 @@ const storage = multer.diskStorage({
   },
 });
 
-const upload = multer({ storage });
+const upload = multer({
+  storage, fileFilter: (req, file, cb) => {
+    const allowedExtensions = ['.sil'];
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (allowedExtensions.includes(ext)) {
+      cb(null, true);
+    } else {
+      console.log('拦截非 sil 文件，不保存:', file.originalname);
+      cb(null, false);
+    }
+  },
+});
 
 // 语音识别 API 配置
 const lfasr_host = 'https://raasr.xfyun.cn/v2/api';
@@ -41,15 +52,20 @@ function getSigna(appid, secret_key, ts) {
 }
 
 // 解析文字
-function parseOrderResult(orderResult) {
+function extractTextFromLattice(orderResult) {
   try {
-    const parsedResult = JSON.parse(orderResult);
-    const lattice = parsedResult.lattice[0];
-    const json1Best = JSON.parse(lattice.json_1best);
-    const words = json1Best.st.rt[0].ws.map(item => item.cw[0].w);
-    return words.join('');
+    const lattice = JSON.parse(orderResult).lattice;
+    return lattice.map(item => {
+      const jsonData = JSON.parse(item.json_1best);
+      const result = jsonData.st.rt
+        .flatMap(rtItem => rtItem.ws)
+        .flatMap(wsItem => wsItem.cw)
+        .map(cwItem => cwItem.w)
+        .join('');
+      return result;
+    }).join('');
   } catch (error) {
-    console.error('解析失败:', error);
+    console.log('解析文字错误', error);
     return '';
   }
 }
@@ -67,7 +83,7 @@ async function uploadFileToIxfy(appid, secret_key, filePath) {
     ts: ts,
     fileSize: file_len,
     fileName: file_name,
-    duration: '200', // 可根据需要调整
+    duration: '200',
   };
 
   const data = fs.readFileSync(filePath);
@@ -95,7 +111,7 @@ async function getResultFromIxfy(appid, secret_key, orderId) {
     signa: signa,
     ts: ts,
     orderId: orderId,
-    resultType: 'transfer,predict',
+    resultType: 'transfer',
   };
 
   let status = 3;
@@ -108,8 +124,8 @@ async function getResultFromIxfy(appid, secret_key, orderId) {
       );
       status = response.data.content.orderInfo.status;
       console.log("Status:", status);
-      if (status === -1) {
-        return parseOrderResult(response.data.content.orderResult);
+      if (status === 4) {
+        return extractTextFromLattice(response.data.content.orderResult);
       }
       await new Promise(resolve => setTimeout(resolve, 2000));
     } catch (error) {
@@ -138,6 +154,7 @@ app.post('/api/receive-message', upload.single('content'), async (req, res) => {
         console.log('文本消息:', req.body.content);
         break;
       case 'file':
+        if (!req.file) break;
         console.log('文件消息路径:', req.file.path);
         if (path.extname(req.file.path) === '.mp3') {
           // 如果是 MP3 文件，调用语音识别 API
